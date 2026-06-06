@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ghost Wards — Move Mirror</title>
+<style>
+  :root{
+    --bg:#0c0c14; --panel:#16161f; --ink:#e9ecf5; --mute:#7e85a0;
+    --accent:#7bd3ff; --good:#6ff0a6; --bad:#ff6b8a;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden}
+  body{background:radial-gradient(1200px 800px at 50% 45%,#1b1b2e,#0a0a11 70%);
+       color:var(--ink);font-family:-apple-system,Helvetica,Arial,sans-serif;user-select:none}
+  #hud{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;
+       align-items:center;padding:14px 22px;font-size:15px;z-index:5}
+  .stat{display:flex;gap:14px;align-items:center}
+  .pill{background:rgba(22,22,31,.7);border:1px solid #262636;border-radius:999px;
+        padding:6px 14px;display:flex;gap:8px;align-items:center}
+  .pill b{font-size:21px}
+  #dot{width:10px;height:10px;border-radius:50%;background:var(--bad);
+       box-shadow:0 0 10px currentColor;color:var(--bad)}
+  #dot.on{background:var(--good);color:var(--good)}
+  #hearts{font-size:24px;letter-spacing:3px;color:var(--bad)}
+  #game{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #flash{position:fixed;inset:0;background:var(--bad);opacity:0;pointer-events:none}
+  #flash.hit{animation:hit .4s}
+  @keyframes hit{0%{opacity:.35}100%{opacity:0}}
+  #axes{position:fixed;bottom:14px;left:22px;display:flex;gap:22px;align-items:flex-end;height:70px;z-index:5}
+  .bar{width:24px;background:#202030;border-radius:5px 5px 0 0;align-self:flex-end;
+       transition:height .05s;position:relative}
+  .bar span{position:absolute;bottom:-20px;left:0;right:0;text-align:center;color:var(--mute);font-size:12px}
+  #lastdir{position:fixed;bottom:18px;right:22px;color:var(--mute);font-size:14px;z-index:5}
+  #overlay{position:fixed;inset:0;background:rgba(8,8,14,.88);display:flex;flex-direction:column;
+           align-items:center;justify-content:center;gap:18px;text-align:center;z-index:10}
+  #overlay h1{font-size:52px}
+  #overlay p{color:var(--mute);font-size:19px;max-width:640px;line-height:1.55}
+  .key{color:var(--accent);font-weight:700}
+  .hidden{display:none!important}
+</style>
+</head>
+<body>
+  <div id="hud">
+    <div class="stat">
+      <div class="pill">score <b id="score">0</b></div>
+      <div class="pill">wave <b id="level">1</b></div>
+    </div>
+    <div class="stat">
+      <div id="hearts">♥♥♥</div>
+      <div class="pill"><span id="dot"></span><span id="src">connecting…</span></div>
+    </div>
+  </div>
+
+  <canvas id="game"></canvas>
+  <div id="flash"></div>
+
+  <div id="axes">
+    <div class="bar" id="bx" style="height:4px"><span>X</span></div>
+    <div class="bar" id="by" style="height:4px"><span>Y</span></div>
+    <div class="bar" id="bz" style="height:4px"><span>Z</span></div>
+  </div>
+  <div id="lastdir">last: —</div>
+
+  <div id="overlay">
+    <h1>🧙 Ghost Wards</h1>
+    <p>Ghosts drift in from the dark, each with arrows over its head. Move the
+       accelerometer <b>Up / Down / Left / Right</b> to clear a ghost's arrows in
+       order — clear them all and it vanishes. If a ghost reaches you, you lose a
+       heart. Wrong moves don't hurt you. Survive.</p>
+    <p>No board? Play with the <span class="key">arrow keys</span> (or WASD).<br>
+       Press <span class="key">SPACE</span> or click to start.</p>
+  </div>
+
+<script>
+const DIRS = ["Up","Down","Left","Right"];
+const GLYPH = {Up:"↑", Down:"↓", Left:"←", Right:"→"};
+const $ = id => document.getElementById(id);
+const cv = $("game"), ctx = cv.getContext("2d");
+let W, H, CX, CY;
+function resize(){ W = cv.width = innerWidth; H = cv.height = innerHeight; CX = W/2; CY = H/2; }
+addEventListener("resize", resize); resize();
+
+const HIT_R = 78;                 // ghost reaches the wizard
+let state = "idle";               // idle | playing | over
+let score = 0, defeated = 0, hearts = 3;
+let ghosts = [], poofs = [];
+let spawnTimer = 0, lastTs = 0;
+
+function reset(){
+  score = 0; defeated = 0; hearts = 3;
+  ghosts = []; poofs = []; spawnTimer = 0.6;
+  updateHud();
+}
+function start(){ reset(); state = "playing"; $("overlay").classList.add("hidden"); }
+function gameOver(){
+  state = "over";
+  $("overlay").classList.remove("hidden");
+  $("overlay").innerHTML =
+    `<h1>Game Over</h1><p>You banished <b>${defeated}</b> ghosts — score <b>${score}</b>.</p>
+     <p>Press <span class="key">R</span> or click to play again.</p>`;
+}
+
+function level(){ return 1 + Math.floor(defeated / 4); }
+
+function spawnGhost(){
+  const ang = Math.random() * Math.PI * 2;
+  const rad = Math.hypot(W, H) / 2 + 60;
+  const len = Math.min(1 + Math.floor(defeated / 5), 4);
+  const dirs = Array.from({length: len}, () => DIRS[(Math.random()*4)|0]);
+  ghosts.push({
+    x: CX + Math.cos(ang)*rad, y: CY + Math.sin(ang)*rad,
+    speed: Math.min(42 + defeated*1.6, 115),
+    dirs, alpha: 0,
+    hue: 250 + (Math.random()*60 - 30),
+    wob: Math.random()*Math.PI*2,
+  });
+}
+
+// a directional input clears that arrow from EVERY ghost whose next arrow matches
+function onDirection(dir){
+  $("lastdir").textContent = "last: " + dir;
+  if(state !== "playing") return;
+  const cleared = [];
+  for(const g of ghosts){
+    if(g.alpha >= 0.5 && g.dirs[0] === dir){ g.dirs.shift(); cleared.push(g); }
+  }
+  for(const g of cleared){
+    if(g.dirs.length === 0) banish(g);
+  }
+}
+function banish(g){
+  poofs.push({x:g.x, y:g.y, r:20, a:1});
+  ghosts.splice(ghosts.indexOf(g), 1);
+  defeated++; score += 10; updateHud();
+}
+function loseHeart(g){
+  ghosts.splice(ghosts.indexOf(g), 1);
+  hearts--; updateHud();
+  $("flash").classList.remove("hit"); void $("flash").offsetWidth; $("flash").classList.add("hit");
+  if(hearts <= 0) gameOver();
+}
+
+function update(dt){
+  spawnTimer -= dt;
+  if(spawnTimer <= 0){
+    spawnGhost();
+    spawnTimer = Math.max(0.85, 2.4 - defeated*0.045);
+  }
+  for(const g of ghosts){
+    g.alpha = Math.min(1, g.alpha + dt*2.5);
+    g.wob += dt*3;
+    const dx = CX-g.x, dy = CY-g.y, d = Math.hypot(dx,dy);
+    if(d < HIT_R){ loseHeart(g); continue; }
+    g.x += dx/d * g.speed * dt;
+    g.y += dy/d * g.speed * dt;
+  }
+  for(const p of poofs){ p.r += dt*240; p.a -= dt*2.2; }
+  poofs = poofs.filter(p => p.a > 0);
+}
+
+// --- rendering --------------------------------------------------------------
+function drawWizard(){
+  ctx.save(); ctx.translate(CX, CY);
+  const grd = ctx.createRadialGradient(0,0,10,0,0,90);
+  grd.addColorStop(0,"rgba(123,211,255,.30)"); grd.addColorStop(1,"rgba(123,211,255,0)");
+  ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(0,0,90,0,7); ctx.fill();
+  ctx.fillStyle = "#f1d9bf"; ctx.beginPath(); ctx.arc(0,8,30,0,7); ctx.fill();   // face
+  ctx.fillStyle = "#1b1430";                                                     // eyes
+  ctx.beginPath(); ctx.arc(-10,4,4,0,7); ctx.arc(10,4,4,0,7); ctx.fill();
+  ctx.strokeStyle="#1b1430"; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(0,14,8,0.1,Math.PI-0.1); ctx.stroke();
+  ctx.fillStyle = "#6a3fb5";                                                     // hat
+  ctx.beginPath(); ctx.moveTo(-34,-14); ctx.lineTo(34,-14); ctx.lineTo(6,-72); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#ffd36e"; star(8,-44,8,5);                                    // hat star
+  ctx.restore();
+}
+function star(x,y,r,n){
+  ctx.beginPath();
+  for(let i=0;i<n*2;i++){ const rr=i%2?r/2.3:r, a=i*Math.PI/n - Math.PI/2;
+    ctx[i?"lineTo":"moveTo"](x+Math.cos(a)*rr, y+Math.sin(a)*rr); }
+  ctx.closePath(); ctx.fill();
+}
+function drawGhost(g){
+  const s = 1, w = 26, h = 30, sway = Math.sin(g.wob)*3;
+  ctx.save(); ctx.globalAlpha = g.alpha; ctx.translate(g.x + sway, g.y);
+  ctx.shadowColor = `hsla(${g.hue},90%,75%,.8)`; ctx.shadowBlur = 22;
+  ctx.fillStyle = `hsl(${g.hue},70%,86%)`;
+  ctx.beginPath();
+  ctx.arc(0,-h*0.2,w,Math.PI,0);                         // dome
+  ctx.lineTo(w,h);                                        // right side
+  for(let i=0;i<4;i++){ const x=w-(i*2+1)*(w/4), y=h-(i%2?10:0);
+    ctx.quadraticCurveTo(x+ w/8, h-10, x, h); }
+  ctx.lineTo(-w,h); ctx.closePath(); ctx.fill();
+  ctx.shadowBlur = 0; ctx.fillStyle = "#241a3a";          // eyes
+  ctx.beginPath(); ctx.arc(-9,-6,4.5,0,7); ctx.arc(9,-6,4.5,0,7); ctx.fill();
+  ctx.restore();
+  drawArrows(g, w, h);
+}
+function drawArrows(g, w, h){
+  const top = g.y - h - 26, gap = 30, n = g.dirs.length;
+  ctx.save(); ctx.globalAlpha = g.alpha;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  const x0 = g.x - (n-1)*gap/2;
+  g.dirs.forEach((d,i) => {
+    const x = x0 + i*gap, cur = i === 0;
+    const pulse = cur ? 1 + Math.sin(Date.now()/180)*0.12 : 1;
+    ctx.font = `${(cur?26:20)*pulse}px -apple-system,Helvetica,sans-serif`;
+    ctx.fillStyle = cur ? "#7bd3ff" : "rgba(180,186,210,.55)";
+    if(cur){ ctx.shadowColor = "#7bd3ff"; ctx.shadowBlur = 12; } else ctx.shadowBlur = 0;
+    ctx.fillText(GLYPH[d], x, top);
+  });
+  ctx.restore();
+}
+function drawPoof(p){
+  ctx.save(); ctx.globalAlpha = Math.max(0,p.a);
+  ctx.strokeStyle = "#cde9ff"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,7); ctx.stroke(); ctx.restore();
+}
+function render(){
+  ctx.clearRect(0,0,W,H);
+  if(state !== "idle"){
+    // faint targeting ring on the nearest ghost
+    let near=null,nd=Infinity;
+    for(const g of ghosts){ const d=Math.hypot(g.x-CX,g.y-CY); if(d<nd){nd=d;near=g;} }
+    if(near){ ctx.save(); ctx.globalAlpha=.25*near.alpha; ctx.strokeStyle="#7bd3ff";
+      ctx.lineWidth=2; ctx.beginPath(); ctx.arc(near.x,near.y,40,0,7); ctx.stroke(); ctx.restore(); }
+    drawWizard();
+    for(const g of ghosts) drawGhost(g);
+    for(const p of poofs) drawPoof(p);
+  }
+}
+function loop(ts){
+  const dt = Math.min(0.05, (ts - lastTs)/1000 || 0); lastTs = ts;
+  if(state === "playing") update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+function updateHud(){
+  $("score").textContent = score;
+  $("level").textContent = level();
+  $("hearts").textContent = "♥".repeat(Math.max(0,hearts)) + "♡".repeat(Math.max(0,3-hearts));
+}
+
+// --- input ------------------------------------------------------------------
+const KEYMAP = {ArrowUp:"Up",ArrowDown:"Down",ArrowLeft:"Left",ArrowRight:"Right",
+                w:"Up",s:"Down",a:"Left",d:"Right"};
+addEventListener("keydown", e => {
+  if(e.key === " "){ e.preventDefault(); if(state==="idle") start(); return; }
+  if((e.key==="r"||e.key==="R") && state==="over"){ start(); return; }
+  const d = KEYMAP[e.key];
+  if(d){ e.preventDefault(); onDirection(d); }
+});
+addEventListener("click", () => { if(state==="idle"||state==="over") start(); });
+
+const es = new EventSource("/events");
+es.addEventListener("direction", e => onDirection(JSON.parse(e.data).dir));
+es.addEventListener("sample", e => {
+  const s = JSON.parse(e.data); setBar("bx",s.x); setBar("by",s.y); setBar("bz",s.z);
+});
+es.onopen  = () => $("dot").classList.add("on");
+es.onerror = () => $("dot").classList.remove("on");
+function setBar(id,g){ const h=Math.max(4,Math.min(64,Math.abs(g)*24));
+  $(id).style.height=h+"px"; $(id).style.background=Math.abs(g)>1.4?"var(--accent)":"#2a2a40"; }
+
+fetch("/status").then(r=>r.json()).then(s=>{$("src").textContent=s.source;})
+                .catch(()=>{$("src").textContent="offline";});
+updateHud();
+</script>
+</body>
+</html>
