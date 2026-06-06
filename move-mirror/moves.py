@@ -95,3 +95,88 @@ class MoveDetector:
                         t=s.t,
                     )
         return None
+
+
+# --- tilt-based detection ----------------------------------------------------
+def _norm(v):
+    return math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+
+
+def _unit(v):
+    n = _norm(v)
+    return (v[0] / n, v[1] / n, v[2] / n) if n > 1e-9 else (0.0, 0.0, 1.0)
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _angle_deg(a, b):
+    return math.degrees(math.acos(max(-1.0, min(1.0, _dot(_unit(a), _unit(b))))))
+
+
+class TiltDetector:
+    """Direction from TILT (gravity orientation) — robust, unambiguous.
+
+    Unlike flick detection, this has no accel/decel double-pulse problem: it reads
+    where gravity points. The smoothed gravity vector is matched to the nearest of
+    four calibrated tilt poses once it leaves neutral. One event per tilt
+    (hysteresis), so holding a tilt doesn't repeat-fire. Ships with sensible
+    defaults so it works out-of-box; calibration refines the mapping to how the
+    sensor is actually held.
+    """
+    DIRS = ("Up", "Down", "Left", "Right")
+
+    def __init__(self, on_deg=20.0, off_deg=10.0, smooth_alpha=0.15):
+        self.on_deg = on_deg
+        self.off_deg = off_deg
+        self.alpha = smooth_alpha
+        self.g = [0.0, 0.0, 1.0]
+        self._init = False
+        self._tilted = False
+        # default mapping (typical flat-ish hold); calibration overrides these
+        self.neutral = (0.0, 0.0, 1.0)
+        self.templates = {
+            "Up": _unit((0.0, 0.5, 0.866)),
+            "Down": _unit((0.0, -0.5, 0.866)),
+            "Left": _unit((-0.5, 0.0, 0.866)),
+            "Right": _unit((0.5, 0.0, 0.866)),
+        }
+
+    def feed(self, s: Sample):
+        a = (s.ax, s.ay, s.az)
+        if not self._init:
+            self.g = [a[0], a[1], a[2]]
+            self._init = True
+        else:
+            for i in range(3):
+                self.g[i] = (1 - self.alpha) * self.g[i] + self.alpha * a[i]
+        if not self.ready:
+            return None
+        ang = _angle_deg(self.g, self.neutral)
+        if not self._tilted and ang >= self.on_deg:
+            self._tilted = True
+            g_unit = _unit(tuple(self.g))
+            name = max(self.DIRS, key=lambda d: _dot(g_unit, self.templates[d]))
+            return MoveEvent(name=name, peak_g=ang, axis="tilt", t=s.t)
+        if self._tilted and ang <= self.off_deg:
+            self._tilted = False
+        return None
+
+    def capture(self, name: str):
+        """Store the current smoothed gravity as a calibration pose."""
+        vec = _unit(tuple(self.g))
+        if name == "neutral":
+            self.neutral = vec
+        elif name in self.DIRS:
+            self.templates[name] = vec
+        return self.status()
+
+    @property
+    def ready(self):
+        return self.neutral is not None and all(d in self.templates for d in self.DIRS)
+
+    def status(self):
+        captured = (["neutral"] if self.neutral is not None else [])
+        captured += [d for d in self.DIRS if d in self.templates]
+        return {"captured": captured, "ready": self.ready}

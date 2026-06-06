@@ -36,18 +36,22 @@ Other flags: `--auto-sim` (sim moves itself, for a hands-off demo),
 
 ## How motion becomes a direction
 
-`moves.py` removes gravity with a slow per-axis baseline, then on each motion
-spike picks the dominant axis + sign and maps it to a direction:
+Default is **tilt detection** (`TiltDetector` in `moves.py`): it reads where
+gravity points (the smoothed gravity vector) and matches it to the nearest of
+four calibrated tilt poses. This is robust — unlike flick detection, it has no
+accel/decel "double-pulse" ambiguity, so Left vs Right never flips. One event
+per tilt (hysteresis), so holding a tilt doesn't repeat-fire.
 
-| motion | direction |
-|---|---|
-| +X / −X | Right / Left |
-| +Y / −Y | Up / Down |
-| Z axis | ignored (not a play direction) |
+**Calibrate to your hand:** in the browser, press **C** and follow the five
+prompts (neutral, then tilt Up/Down/Left/Right). It learns your sensor's actual
+orientation, so it works no matter how the board is held. Ships with sensible
+defaults, so it also works un-calibrated for a rough demo.
 
-**The mapping is one dict** (`AXIS_MOVES` in `moves.py`). Once you see how the
-sensor sits in the hand, flip a sign or swap an axis there — that's the only
-place the physical-motion ↔ direction relationship lives. Nothing else changes.
+Calibration is just `POST /calibrate?dir=<neutral|Up|Down|Left|Right>`, which
+snapshots the current gravity vector; `GET /calibration` reports readiness.
+
+`--flick` switches to the older spike-based `MoveDetector` (dominant axis+sign)
+if you'd rather punch than tilt — less reliable without per-hold tuning.
 
 ## Tests
 

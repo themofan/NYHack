@@ -5,8 +5,64 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from moves import MoveDetector, Sample, move_for, AXIS_MOVES, VALID_DIRECTIONS
+from moves import (MoveDetector, TiltDetector, Sample, move_for, AXIS_MOVES,
+                   VALID_DIRECTIONS)
 from sources import SimSampleSource
+
+
+def _settle(det, vec, n=45, t0=0.0, dt=0.01):
+    t = t0
+    for _ in range(n):
+        det.feed(Sample(t, *vec)); t += dt
+    return t
+
+
+def _first_event(det, vec, n=80, t0=0.0, dt=0.01):
+    t = t0
+    for _ in range(n):
+        ev = det.feed(Sample(t, *vec)); t += dt
+        if ev:
+            return ev
+    return None
+
+
+def test_tilt_default_mapping_detects_each():
+    cases = {"Up": (0, 0.6, 0.8), "Down": (0, -0.6, 0.8),
+             "Left": (-0.6, 0, 0.8), "Right": (0.6, 0, 0.8)}
+    for name, tilt in cases.items():
+        det = TiltDetector()
+        _settle(det, (0, 0, 1))                 # neutral
+        ev = _first_event(det, tilt)
+        assert ev is not None and ev.name == name, f"{name}: got {ev and ev.name}"
+
+
+def test_tilt_one_shot_then_resets():
+    det = TiltDetector()
+    _settle(det, (0, 0, 1))
+    up = (0, 0.6, 0.8)
+    # held tilt fires exactly once
+    fired = sum(1 for _ in range(80) if det.feed(Sample(_*0.01, *up)))
+    assert fired == 1
+    _settle(det, (0, 0, 1))                     # return to neutral re-arms it
+    assert _first_event(det, up) is not None
+
+
+def test_tilt_capture_overrides_mapping():
+    det = TiltDetector()
+    # teach a remapped scheme across four DISTINCT azimuths
+    poses = {"Up": (0.6, 0, 0.8), "Down": (-0.6, 0, 0.8),
+             "Left": (0, 0.6, 0.8), "Right": (0, -0.6, 0.8)}
+    for name, vec in poses.items():
+        _settle(det, vec); det.capture(name)
+    _settle(det, (0, 0, 1)); det.capture("neutral")
+
+    assert _first_event(det, (0.6, 0, 0.8)).name == "Up"      # +X now means Up
+    _settle(det, (0, 0, 1))                                   # re-arm
+    assert _first_event(det, (0, 0.6, 0.8)).name == "Left"    # +Y now means Left
+
+
+def test_tilt_status_ready_by_default():
+    assert TiltDetector().status()["ready"] is True
 
 
 def test_axis_mapping():

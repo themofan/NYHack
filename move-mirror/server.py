@@ -21,7 +21,7 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from moves import MoveDetector, VALID_DIRECTIONS
+from moves import MoveDetector, TiltDetector, VALID_DIRECTIONS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "web")
@@ -70,10 +70,20 @@ def worker(hub: Hub, source, detector: MoveDetector, stop: threading.Event) -> N
             last_sample = s.t
 
 
-def make_handler(hub: Hub, status_fn):
+def make_handler(hub: Hub, status_fn, detector):
+    from urllib.parse import urlparse, parse_qs
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):            # quiet console
             pass
+
+        def _json(self, obj, code=200):
+            body = json.dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def _send_file(self, name, ctype):
             path = os.path.join(WEB, name)
@@ -93,14 +103,23 @@ def make_handler(hub: Hub, status_fn):
             if self.path in ("/", "/index.html"):
                 self._send_file("index.html", "text/html; charset=utf-8")
             elif self.path == "/status":
-                body = json.dumps(status_fn()).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._json(status_fn())
+            elif self.path == "/calibration":
+                self._json(detector.status() if hasattr(detector, "status")
+                           else {"ready": False})
             elif self.path == "/events":
                 self._sse()
+            else:
+                self.send_error(404)
+
+        def do_POST(self):
+            u = urlparse(self.path)
+            if u.path == "/calibrate" and hasattr(detector, "capture"):
+                d = (parse_qs(u.query).get("dir") or [None])[0]
+                if d:
+                    self._json(detector.capture(d))
+                else:
+                    self.send_error(400, "missing dir")
             else:
                 self.send_error(404)
 
@@ -138,6 +157,8 @@ def main():
     ap.add_argument("--port", default=None, help="serial port of the STM32 board")
     ap.add_argument("--http-port", type=int, default=8000)
     ap.add_argument("--no-open", action="store_true", help="don't auto-open the browser")
+    ap.add_argument("--flick", action="store_true",
+                    help="use flick detection instead of the default tilt detection")
     args = ap.parse_args()
 
     if args.sim or args.auto_sim:
@@ -153,12 +174,18 @@ def main():
             source = SimSampleSource(auto=False)
 
     hub = Hub()
-    detector = MoveDetector()
+    detector = MoveDetector() if args.flick else TiltDetector()
     stop = threading.Event()
     threading.Thread(target=worker, args=(hub, source, detector, stop), daemon=True).start()
 
-    handler = make_handler(hub, lambda: {"source": source.status_text,
-                                         "connected": source.connected})
+    def status():
+        s = {"source": source.status_text, "connected": source.connected,
+             "mode": "flick" if args.flick else "tilt"}
+        if hasattr(detector, "status"):
+            s["calibration"] = detector.status()
+        return s
+
+    handler = make_handler(hub, status, detector)
     httpd = ThreadingHTTPServer(("127.0.0.1", args.http_port), handler)
     url = f"http://localhost:{args.http_port}"
     print(f"Move Mirror running → {url}   ({source.status_text})")

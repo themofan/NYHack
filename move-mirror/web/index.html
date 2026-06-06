@@ -243,16 +243,71 @@ function updateHud(){
   $("hearts").textContent = "♥".repeat(Math.max(0,hearts)) + "♡".repeat(Math.max(0,3-hearts));
 }
 
+// --- calibration (learns the sensor's tilt orientation) ---------------------
+const CALSTEPS = [
+  ["neutral","Hold the sensor in its resting pose"],
+  ["Up","Tilt UP and hold"],
+  ["Down","Tilt DOWN and hold"],
+  ["Left","Tilt LEFT and hold"],
+  ["Right","Tilt RIGHT and hold"],
+];
+let calibStep = 0;
+function showMenu(note){
+  state = "idle";
+  $("overlay").classList.remove("hidden");
+  $("overlay").innerHTML =
+    `<h1>🧙 Ghost Wards</h1>` +
+    (note ? `<p style="color:var(--good)">${note}</p>` : "") +
+    `<p>Ghosts drift in with arrows over their heads. Move the accelerometer
+        <b>Up / Down / Left / Right</b> to clear them. A ghost reaching you costs a
+        heart — wrong moves don't.</p>
+     <p>No board? <span class="key">Arrow keys</span> / WASD.<br>
+        <span class="key">SPACE</span> or click = play &nbsp;·&nbsp;
+        <span class="key">C</span> = calibrate sensor</p>`;
+}
+function startCalib(){ state = "calib"; calibStep = 0; showCalib(); }
+function showCalib(){
+  const done = CALSTEPS.slice(0, calibStep).map(s => s[0]).join(" · ") || "—";
+  $("overlay").classList.remove("hidden");
+  $("overlay").innerHTML =
+    `<h1>Calibrate ${calibStep+1}/5</h1>
+     <p style="font-size:30px;color:var(--ink)">${CALSTEPS[calibStep][1]}</p>
+     <p>Then press <span class="key">SPACE</span> or click to capture.
+        &nbsp;(<span class="key">Esc</span> cancels)</p>
+     <p style="font-size:15px">captured: ${done}</p>`;
+}
+function calibCapture(){
+  fetch("/calibrate?dir=" + encodeURIComponent(CALSTEPS[calibStep][0]), {method:"POST"})
+    .then(r => r.json())
+    .then(() => {
+      calibStep++;
+      if(calibStep >= CALSTEPS.length) showMenu("Calibrated ✓ — SPACE to play");
+      else showCalib();
+    })
+    .catch(() => showMenu("Calibration needs the board connected."));
+}
+
 // --- input ------------------------------------------------------------------
 const KEYMAP = {ArrowUp:"Up",ArrowDown:"Down",ArrowLeft:"Left",ArrowRight:"Right",
                 w:"Up",s:"Down",a:"Left",d:"Right"};
 addEventListener("keydown", e => {
-  if(e.key === " "){ e.preventDefault(); if(state==="idle") start(); return; }
+  if((e.key==="c"||e.key==="C") && state==="idle"){ startCalib(); return; }
+  if(e.key==="Escape" && state==="calib"){ showMenu(); return; }
+  if(e.key === " "){
+    e.preventDefault();
+    if(state==="idle") start();
+    else if(state==="calib") calibCapture();
+    return;
+  }
   if((e.key==="r"||e.key==="R") && state==="over"){ start(); return; }
   const d = KEYMAP[e.key];
   if(d){ e.preventDefault(); onDirection(d); }
 });
-addEventListener("click", () => { if(state==="idle"||state==="over") start(); });
+addEventListener("click", () => {
+  if(state==="idle") start();
+  else if(state==="calib") calibCapture();
+  else if(state==="over") start();
+});
 
 const es = new EventSource("/events");
 es.addEventListener("direction", e => onDirection(JSON.parse(e.data).dir));
@@ -267,6 +322,7 @@ function setBar(id,g){ const h=Math.max(4,Math.min(64,Math.abs(g)*24));
 fetch("/status").then(r=>r.json()).then(s=>{$("src").textContent=s.source;})
                 .catch(()=>{$("src").textContent="offline";});
 updateHud();
+showMenu();
 </script>
 </body>
 </html>
