@@ -1,0 +1,2 @@
+# Only needed for real-board (serial) mode. Simulator + game need stdlib only.
+pyserial>=3.5
